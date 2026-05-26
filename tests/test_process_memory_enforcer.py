@@ -290,8 +290,6 @@ class TestDisabledWhenMaxBytesZero:
         self, mock_engine_pool
     ):
         """Propagating max_bytes=0 sets scheduler limit to 0 (disabled)."""
-        from omlx.scheduler import _MemoryLimitState
-
         enforcer = ProcessMemoryEnforcer(
             engine_pool=mock_engine_pool, max_bytes=0
         )
@@ -299,9 +297,8 @@ class TestDisabledWhenMaxBytesZero:
         bg._memory_limit_bytes = 999
         bg._memory_hard_limit_bytes = 999
         scheduler = MagicMock(spec=[])
-        scheduler._memory_state = _MemoryLimitState(
-            memory_limit_bytes=999, memory_hard_limit_bytes=999
-        )
+        scheduler._memory_limit_bytes = 999
+        scheduler._memory_hard_limit_bytes = 999
         scheduler.batch_generator = bg
         engine = MagicMock(spec=[])
         engine.scheduler = scheduler
@@ -310,8 +307,8 @@ class TestDisabledWhenMaxBytesZero:
 
         enforcer._propagate_memory_limit()
 
-        assert scheduler._memory_state.memory_limit_bytes == 0
-        assert scheduler._memory_state.memory_hard_limit_bytes == 0
+        assert scheduler._memory_limit_bytes == 0
+        assert scheduler._memory_hard_limit_bytes == 0
         assert bg._memory_limit_bytes == 0
         assert bg._memory_hard_limit_bytes == 0
 
@@ -529,13 +526,10 @@ class TestMemoryLimitPropagation:
 
     def test_propagate_memory_limit(self, enforcer):
         """Propagates soft and hard limits to scheduler and batch_generator."""
-        from omlx.scheduler import _MemoryLimitState
-
         bg = MagicMock(spec=[])
         bg._memory_limit_bytes = 0
         bg._memory_hard_limit_bytes = 0
         scheduler = MagicMock(spec=[])
-        scheduler._memory_state = _MemoryLimitState()
         scheduler.batch_generator = bg
         engine = MagicMock(spec=[])
         engine.scheduler = scheduler
@@ -546,54 +540,19 @@ class TestMemoryLimitPropagation:
             mock_mem.return_value = 96 * 1024**3
             enforcer._propagate_memory_limit()
 
-        assert scheduler._memory_state.memory_limit_bytes == 10 * 1024**3
+        assert scheduler._memory_limit_bytes == 10 * 1024**3
         assert bg._memory_limit_bytes == 10 * 1024**3
         # hard limit propagated to the scheduler equals max_bytes (the user's
         # configured ceiling), independent of system_ram
-        assert scheduler._memory_state.memory_hard_limit_bytes == 10 * 1024**3
+        assert scheduler._memory_hard_limit_bytes == 10 * 1024**3
         assert bg._memory_hard_limit_bytes == 10 * 1024**3
 
-    def test_propagate_publishes_atomic_memory_state_bundle(self, enforcer):
-        """The four (memory_limit, memory_hard_limit, prefill_memory_guard,
-        admission_paused) fields must be published as a single
-        ``_MemoryLimitState`` reference store so the API hot-path reader
-        (``_preflight_memory_check``) cannot observe a mixed
-        (guard=True, hard_limit=0) snapshot. Under PEP 703 free-threading
-        the four-separate-attribute writes are no longer GIL-serialized
-        into a coherent order from another thread's perspective; the
-        bundle removes that fragility.
-        """
-        from omlx.scheduler import _MemoryLimitState
-
-        bg = MagicMock(spec=[])
-        bg._memory_limit_bytes = 0
-        bg._memory_hard_limit_bytes = 0
+    def test_propagate_with_guard_disabled(self, enforcer):
+        """When the guard is disabled the field reflects it; hard limit is
+        still propagated for observability — the reader's early-return on
+        ``prefill_memory_guard=False`` makes the value moot for the
+        rejection path."""
         scheduler = MagicMock(spec=[])
-        scheduler._memory_state = _MemoryLimitState()
-        scheduler.batch_generator = bg
-        engine = MagicMock(spec=[])
-        engine.scheduler = scheduler
-        entry = _make_entry("model-a", engine=engine)
-        enforcer._engine_pool._entries = {"model-a": entry}
-
-        enforcer._propagate_memory_limit()
-
-        # Bundle is a frozen dataclass with the four fields coherent.
-        assert isinstance(scheduler._memory_state, _MemoryLimitState)
-        assert scheduler._memory_state.memory_limit_bytes == 10 * 1024**3
-        assert scheduler._memory_state.memory_hard_limit_bytes == 10 * 1024**3
-        assert scheduler._memory_state.prefill_memory_guard is True
-        assert scheduler._memory_state.admission_paused is False
-
-    def test_memory_state_bundle_matches_guard_off_path(self, enforcer):
-        """When the guard is disabled the bundle reflects it — reader's
-        single-snapshot read yields ``prefill_memory_guard=False`` and
-        the early-return path skips the rest of the check.
-        """
-        from omlx.scheduler import _MemoryLimitState
-
-        scheduler = MagicMock(spec=[])
-        scheduler._memory_state = _MemoryLimitState()
         engine = MagicMock(spec=[])
         engine.scheduler = scheduler
         entry = _make_entry("model-a", engine=engine)
@@ -602,20 +561,15 @@ class TestMemoryLimitPropagation:
 
         enforcer._propagate_memory_limit()
 
-        assert scheduler._memory_state.prefill_memory_guard is False
-        # Hard limit is still propagated for observability — guard==False
-        # makes the reader short-circuit before touching it.
-        assert scheduler._memory_state.memory_hard_limit_bytes == 10 * 1024**3
+        assert scheduler._prefill_memory_guard is False
+        assert scheduler._memory_hard_limit_bytes == 10 * 1024**3
 
     def test_propagates_on_max_bytes_change(self, enforcer):
         """Propagates updated limits when max_bytes is changed at runtime."""
-        from omlx.scheduler import _MemoryLimitState
-
         bg = MagicMock(spec=[])
         bg._memory_limit_bytes = 0
         bg._memory_hard_limit_bytes = 0
         scheduler = MagicMock(spec=[])
-        scheduler._memory_state = _MemoryLimitState()
         scheduler.batch_generator = bg
         engine = MagicMock(spec=[])
         engine.scheduler = scheduler
@@ -627,7 +581,7 @@ class TestMemoryLimitPropagation:
             mock_mem.return_value = 96 * 1024**3
             enforcer.max_bytes = 20 * 1024**3
 
-        assert scheduler._memory_state.memory_limit_bytes == 20 * 1024**3
+        assert scheduler._memory_limit_bytes == 20 * 1024**3
         assert bg._memory_limit_bytes == 20 * 1024**3
 
     def test_skips_engine_without_scheduler(self, enforcer):
@@ -642,15 +596,12 @@ class TestMemoryLimitPropagation:
 
     def test_propagates_to_multiple_engines(self, enforcer):
         """Propagates to all engines."""
-        from omlx.scheduler import _MemoryLimitState
-
         schedulers = []
         entries = {}
         for i in range(3):
             bg = MagicMock(spec=[])
             bg._memory_limit_bytes = 0
             scheduler = MagicMock(spec=[])
-            scheduler._memory_state = _MemoryLimitState()
             scheduler.batch_generator = bg
             schedulers.append(scheduler)
             engine = MagicMock(spec=[])
@@ -662,7 +613,7 @@ class TestMemoryLimitPropagation:
         enforcer._propagate_memory_limit()
 
         for scheduler in schedulers:
-            assert scheduler._memory_state.memory_limit_bytes == 10 * 1024**3
+            assert scheduler._memory_limit_bytes == 10 * 1024**3
 
     async def test_check_and_enforce_propagates_every_poll(self, enforcer):
         """Regression: a fresh engine loaded AFTER enforcer.start() must pick
@@ -676,8 +627,6 @@ class TestMemoryLimitPropagation:
         short-circuited, the request entered prefill, and the underlying
         Apple IOGPUFamily bug (FB22091885) panicked the kernel mid-chunk.
         """
-        from omlx.scheduler import _MemoryLimitState
-
         # Engine pool starts empty (mirrors real startup: lazy load on first
         # request, well after enforcer.start()).
         enforcer._engine_pool._entries = {}
@@ -686,7 +635,6 @@ class TestMemoryLimitPropagation:
         bg._memory_limit_bytes = 0
         bg._memory_hard_limit_bytes = 0
         scheduler = MagicMock(spec=[])
-        scheduler._memory_state = _MemoryLimitState()
         scheduler.batch_generator = bg
         engine = MagicMock(spec=[])
         engine.scheduler = scheduler
@@ -702,9 +650,9 @@ class TestMemoryLimitPropagation:
 
         # Within one poll, the freshly-loaded engine has the user-configured
         # ceiling and the guard flag.
-        assert scheduler._memory_state.memory_hard_limit_bytes == 10 * 1024**3
-        assert scheduler._memory_state.memory_limit_bytes == 10 * 1024**3
-        assert scheduler._memory_state.prefill_memory_guard is True
+        assert scheduler._memory_hard_limit_bytes == 10 * 1024**3
+        assert scheduler._memory_limit_bytes == 10 * 1024**3
+        assert scheduler._prefill_memory_guard is True
 
     def test_propagates_through_batched_engine_wrapper(self, enforcer):
         """Regression: live engines in EnginePool don't expose ``.scheduler``
@@ -721,10 +669,7 @@ class TestMemoryLimitPropagation:
         #   entry.engine._engine          → AsyncEngineCore
         #   entry.engine._engine.engine   → EngineCore
         #   entry.engine._engine.engine.scheduler → Scheduler  ← target
-        from omlx.scheduler import _MemoryLimitState
-
         scheduler = MagicMock(spec=[])
-        scheduler._memory_state = _MemoryLimitState()
         scheduler.batch_generator = None
         engine_core = MagicMock(spec=["scheduler"])
         engine_core.scheduler = scheduler
@@ -740,9 +685,9 @@ class TestMemoryLimitPropagation:
 
         enforcer._propagate_memory_limit()
 
-        assert scheduler._memory_state.memory_limit_bytes == 10 * 1024**3
-        assert scheduler._memory_state.memory_hard_limit_bytes == 10 * 1024**3
-        assert scheduler._memory_state.prefill_memory_guard is True
+        assert scheduler._memory_limit_bytes == 10 * 1024**3
+        assert scheduler._memory_hard_limit_bytes == 10 * 1024**3
+        assert scheduler._prefill_memory_guard is True
 
     def test_unresolvable_scheduler_logs_warning_once(self, enforcer, caplog):
         """If the wrapper-chain traversal fails (no ``scheduler`` anywhere
@@ -977,12 +922,9 @@ class TestTwoWatermarkPressureLevels:
 
     @pytest.mark.asyncio
     async def test_propagates_admission_paused_on_soft(self, enforcer_2wm, pool):
-        from omlx.scheduler import _MemoryLimitState
-
         # Wire a scheduler-like mock so propagate has something to set.
         engine = MagicMock()
         scheduler = MagicMock()
-        scheduler._memory_state = _MemoryLimitState()
         engine.scheduler = scheduler
         entry = _make_entry("m", engine=engine)
         pool._entries = {"m": entry}
@@ -993,15 +935,13 @@ class TestTwoWatermarkPressureLevels:
             gpf.return_value = 88 * 1024**3
             await enforcer_2wm._check_and_enforce()
 
-        assert scheduler._memory_state.admission_paused is True
+        assert scheduler._admission_paused is True
 
     @pytest.mark.asyncio
     async def test_clears_admission_paused_on_recovery(self, enforcer_2wm, pool):
-        from omlx.scheduler import _MemoryLimitState
-
         engine = MagicMock()
         scheduler = MagicMock()
-        scheduler._memory_state = _MemoryLimitState(admission_paused=True)
+        scheduler._admission_paused = True
         engine.scheduler = scheduler
         entry = _make_entry("m", engine=engine, is_pinned=True)
         pool._entries = {"m": entry}
@@ -1016,7 +956,7 @@ class TestTwoWatermarkPressureLevels:
             await enforcer_2wm._check_and_enforce()
 
         assert enforcer_2wm._pressure_level == "ok"
-        assert scheduler._memory_state.admission_paused is False
+        assert scheduler._admission_paused is False
 
     @pytest.mark.asyncio
     async def test_hard_aborts_in_flight_when_all_pinned(self, enforcer_2wm, pool):

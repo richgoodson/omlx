@@ -21,7 +21,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -623,31 +623,6 @@ class SchedulerConfig:
     mlx_cache_cleanup_interval: int = 512  # Steps between mx.clear_cache() calls
 
 
-@dataclass(frozen=True, slots=True)
-class _MemoryLimitState:
-    """Immutable bundle of memory-guard fields published by ProcessMemoryEnforcer.
-
-    The four fields form a logical group that the API hot-path
-    preflight check (``_preflight_memory_check_tokens``) must observe
-    consistently — guard True implies hard_limit > 0, the soft limit
-    matches the configured ceiling, and admission_paused tracks the
-    enforcer's pressure level. Bundling them into a single frozen
-    object lets the writer publish via a single reference store, which
-    is atomic regardless of Python memory model (CPython GIL today,
-    PEP 703 free-threading tomorrow).
-
-    The reader does ``state = self._memory_state`` once and accesses
-    fields off the local snapshot; it can never observe a mixed
-    (guard=True, hard_limit=0) combination that would slip a too-large
-    request past the rejection check.
-    """
-
-    memory_limit_bytes: int = 0
-    memory_hard_limit_bytes: int = 0
-    prefill_memory_guard: bool = False
-    admission_paused: bool = False
-
-
 @dataclass
 class SchedulerOutput:
     """
@@ -823,23 +798,13 @@ class Scheduler:
         # the absolute reject/abort threshold (preflight + in-flight mid-
         # prefill checks at ``_do_external_prefill`` / ``_step_prefill_chunk``
         # both compare current_usage + peak against this value).
-        # Atomic-publication bundle for the four memory-guard fields.
-        # The properties below (``_memory_limit_bytes``,
-        # ``_memory_hard_limit_bytes``, ``_prefill_memory_guard``,
-        # ``_admission_paused``) all read from / write to this bundle,
-        # so the API-hot-path reader (``_preflight_memory_check``) can
-        # snapshot the (guard, hard_limit) pair via a single attribute
-        # load and never observe a partially-published combination —
-        # important under PEP 703 free-threading where per-attribute
-        # writes are no longer GIL-serialized into a coherent order
-        # from another thread's perspective.
-        #
-        # Published as a single reference store by
-        # ``ProcessMemoryEnforcer._propagate_memory_limit`` (the
-        # writer assigns ``scheduler._memory_state = new_state``
-        # directly and skips the per-field writes since the
-        # properties would just rebuild the same bundle).
-        self._memory_state: _MemoryLimitState = _MemoryLimitState()
+        self._memory_limit_bytes: int = 0  # soft limit
+        self._memory_hard_limit_bytes: int = 0  # hard limit
+        self._prefill_memory_guard: bool = False  # set by ProcessMemoryEnforcer
+        # Set to True by ProcessMemoryEnforcer when phys_footprint crosses
+        # soft_threshold. Schedulers stop admitting new prefills while this
+        # is set; in-flight requests proceed.
+        self._admission_paused: bool = False
         # Adaptive prefill throttle params, propagated from enforcer.
         # Until set, _adaptive_chunk_size is a no-op (returns requested as-is).
         self._prefill_safe_zone_ratio: float = 0.80
@@ -1064,72 +1029,6 @@ class Scheduler:
         # Must be after _is_harmony_model / _generation_config_eos init
         # since _get_xtc_special_tokens() delegates to _get_stop_tokens().
         self._xtc_special_tokens: list[int] = self._get_xtc_special_tokens()
-
-    # ------------------------------------------------------------------
-    # Memory-guard fields (backed by _memory_state bundle).
-    #
-    # The four properties below expose ``_memory_state`` as four
-    # individual attributes for backwards compat with the dozens of
-    # call sites and tests that read or set them by name. Setting any
-    # of them rebuilds the bundle via ``replace`` (frozen dataclass),
-    # so a single field assignment remains an atomic single-reference
-    # store of the new bundle.
-    #
-    # Production publication still goes through
-    # ``ProcessMemoryEnforcer._propagate_memory_limit`` which assigns
-    # the entire bundle in one ``scheduler._memory_state = new_state``
-    # — the property setters here are for ad-hoc field updates from
-    # tests and any future caller that needs to mutate one field.
-    # ------------------------------------------------------------------
-
-    def _current_memory_state(self) -> _MemoryLimitState:
-        """Return ``_memory_state`` or a fresh default. Property setters
-        invoked before ``__init__`` finishes (e.g. tests that build
-        Schedulers via ``__new__`` and then set fields one at a time)
-        would otherwise hit AttributeError on the first read of
-        ``_memory_state`` inside ``replace``.
-        """
-        return getattr(self, "_memory_state", _MemoryLimitState())
-
-    @property
-    def _memory_limit_bytes(self) -> int:
-        return self._current_memory_state().memory_limit_bytes
-
-    @_memory_limit_bytes.setter
-    def _memory_limit_bytes(self, value: int) -> None:
-        self._memory_state = replace(
-            self._current_memory_state(), memory_limit_bytes=int(value)
-        )
-
-    @property
-    def _memory_hard_limit_bytes(self) -> int:
-        return self._current_memory_state().memory_hard_limit_bytes
-
-    @_memory_hard_limit_bytes.setter
-    def _memory_hard_limit_bytes(self, value: int) -> None:
-        self._memory_state = replace(
-            self._current_memory_state(), memory_hard_limit_bytes=int(value)
-        )
-
-    @property
-    def _prefill_memory_guard(self) -> bool:
-        return self._current_memory_state().prefill_memory_guard
-
-    @_prefill_memory_guard.setter
-    def _prefill_memory_guard(self, value: bool) -> None:
-        self._memory_state = replace(
-            self._current_memory_state(), prefill_memory_guard=bool(value)
-        )
-
-    @property
-    def _admission_paused(self) -> bool:
-        return self._current_memory_state().admission_paused
-
-    @_admission_paused.setter
-    def _admission_paused(self, value: bool) -> None:
-        self._memory_state = replace(
-            self._current_memory_state(), admission_paused=bool(value)
-        )
 
     @contextmanager
     def _phase_timer(self, phase: str):
@@ -4769,18 +4668,14 @@ class Scheduler:
         ``PrefillMemoryExceededError.estimated_bytes`` / ``limit_bytes``
         without parsing the human-readable string.
 
-        Reads the (guard, hard_limit) pair from ``_memory_state`` as a
-        single atomic snapshot. Going through individual properties
-        would do separate bundle loads — under PEP 703 free-threading
-        the writer's bundle reassignment between the two reads could
-        produce a mixed (guard=True, hard_limit=0) view that slips a
-        too-large request past rejection. See ``_MemoryLimitState``
-        and ``ProcessMemoryEnforcer._propagate_memory_limit``.
+        Both fields are written from a single ProcessMemoryEnforcer
+        poll tick under the GIL, so the (guard, hard_limit) pair is
+        consistent for current CPython. See
+        ``ProcessMemoryEnforcer._propagate_memory_limit``.
         """
-        state = self._memory_state
-        if not state.prefill_memory_guard:
+        if not self._prefill_memory_guard:
             return None
-        hard_limit = state.memory_hard_limit_bytes
+        hard_limit = self._memory_hard_limit_bytes
         if hard_limit <= 0:
             return None
         if self.memory_monitor is None:
@@ -4881,11 +4776,9 @@ class Scheduler:
         the full attention matrix [B, n_q, chunk, kv_len] in float32.
         For head_dim <= 128, MLX uses a fused kernel with O(n) memory.
 
-        Reads the (guard, hard_limit) pair from ``_memory_state`` as a
-        single atomic snapshot — the API hot-path must never observe a
-        mixed (guard=True, hard_limit=0) combination, which would let a
-        too-large request slip past rejection. See ``_MemoryLimitState``
-        and ``ProcessMemoryEnforcer._propagate_memory_limit``.
+        Delegates to ``_preflight_memory_check_tokens`` which reads
+        the (guard, hard_limit) pair directly off the scheduler. See
+        ``ProcessMemoryEnforcer._propagate_memory_limit``.
 
         Returns:
             ``_PreflightRejection`` if the request should be rejected,

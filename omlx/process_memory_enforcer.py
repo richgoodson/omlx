@@ -267,45 +267,17 @@ class ProcessMemoryEnforcer:
         this method exists to fix. The snapshot cost is one cheap copy
         of value references.
 
-        Cross-thread visibility — the API hot-path reader
-        (``Scheduler._preflight_memory_check_tokens``) consumes the
-        guard / hard_limit pair as a logical bundle (guard True implies
-        hard_limit > 0). To make the publication atomic regardless of
-        Python memory model — including PEP 703 free-threading where
-        per-attribute STORE_ATTRs are no longer GIL-serialized into a
-        consistent order from another thread's perspective — the bundled
-        state is published as a single reference store of an immutable
-        ``_MemoryLimitState``. The reader does one ``state =
-        scheduler._memory_state`` then accesses fields off the local
-        snapshot, never observing a partially-updated combination.
-
-        Secondary readers (``_do_external_prefill``,
-        ``_step_prefill_chunk``, ``_schedule_waiting``) and ad-hoc
-        test setattrs go through the four ``@property`` accessors on
-        ``Scheduler`` (``_memory_limit_bytes``,
+        The four guard fields (``_memory_limit_bytes``,
         ``_memory_hard_limit_bytes``, ``_prefill_memory_guard``,
-        ``_admission_paused``), all backed by ``_memory_state``.
-        Setting one property rebuilds the bundle via
-        ``dataclasses.replace`` — still a single atomic ref store —
-        so the publication needs only the one bundled assignment
-        below for both readers and writers.
-
-        ``batch_generator`` is a separate object whose memory limits
-        are NOT backed by the bundle (it has no equivalent reader-
-        atomicity requirement), so it keeps its plain attribute
-        writes.
+        ``_admission_paused``) are written as direct attributes. On
+        current CPython the GIL serializes the per-attribute STORE_ATTRs
+        within a single enforcer poll, so the hot-path reader
+        (``Scheduler._preflight_memory_check_tokens``) sees a coherent
+        (guard, hard_limit) pair.
         """
-        from .scheduler import _MemoryLimitState
-
         hard_limit = self._get_hard_limit_bytes()
         admission_paused = self._pressure_level != "ok"
         guard_enabled = self._prefill_memory_guard
-        new_state = _MemoryLimitState(
-            memory_limit_bytes=self._max_bytes,
-            memory_hard_limit_bytes=hard_limit,
-            prefill_memory_guard=guard_enabled,
-            admission_paused=admission_paused,
-        )
         # Snapshot to a list so a future EnginePool mutator on a worker
         # thread cannot interleave — see method docstring.
         for entry in list(self._engine_pool._entries.values()):
@@ -328,14 +300,10 @@ class ProcessMemoryEnforcer:
                             engine_type,
                         )
                     continue
-                # Atomic publication: single reference store. Under any
-                # Python memory model the reader either sees the old
-                # bundle in full or the new bundle in full — never a
-                # mixed (guard=True, hard_limit=0) snapshot. The four
-                # ``@property`` accessors on Scheduler read from this
-                # bundle, so the secondary readers and any test that
-                # sets individual fields still see coherent values.
-                scheduler._memory_state = new_state
+                scheduler._memory_limit_bytes = self._max_bytes
+                scheduler._memory_hard_limit_bytes = hard_limit
+                scheduler._prefill_memory_guard = guard_enabled
+                scheduler._admission_paused = admission_paused
                 scheduler._prefill_safe_zone_ratio = self._prefill_safe_zone_ratio
                 scheduler._prefill_min_chunk_tokens = self._prefill_min_chunk_tokens
                 bg = getattr(scheduler, "batch_generator", None)
