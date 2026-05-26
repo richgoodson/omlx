@@ -217,29 +217,6 @@ class TestOQManagerInit:
         assert mgr._on_complete is cb
 
 
-class TestUpdateModelDirs:
-    def test_changes_output_dir_to_new_first(self, tmp_path):
-        a, b = tmp_path / "a", tmp_path / "b"
-        a.mkdir()
-        b.mkdir()
-        mgr = OQManager(model_dirs=[str(a)])
-        assert mgr._output_dir == a
-
-        mgr.update_model_dirs([str(b), str(a)])
-        assert mgr._model_dirs == [b, a]
-        assert mgr._output_dir == b  # output_dir tracks the head
-
-    def test_update_to_empty_leaves_old_output_dir(self, tmp_path):
-        """Empty update is a no-op for output_dir — protects against an
-        accidental ``Path('.')`` fallback when the admin UI sends an
-        empty list."""
-        mgr = OQManager(model_dirs=[str(tmp_path)])
-        original = mgr._output_dir
-        mgr.update_model_dirs([])
-        assert mgr._model_dirs == []
-        assert mgr._output_dir == original
-
-
 class TestGetTasksAndIsQuantizing:
     def test_initial_state_is_empty_and_idle(self, tmp_path):
         mgr = OQManager(model_dirs=[str(tmp_path)])
@@ -630,7 +607,7 @@ def second_fp_model_dir(tmp_path):
     return d
 
 
-class TestOQManagerUpdateModelDirs:
+class TestUpdateModelDirs:
     @pytest.mark.asyncio
     async def test_picks_up_added_dir(self, fp_model_dir, second_fp_model_dir):
         # Mirrors the real Settings UI flow: server starts with one model
@@ -656,14 +633,26 @@ class TestOQManagerUpdateModelDirs:
     def test_output_dir_tracks_primary_dir(
         self, fp_model_dir, second_fp_model_dir
     ):
-        # Output is always written to the primary (first) directory.
+        # Output is always written to the primary (first) directory and
+        # _model_dirs reflects the exact input order.
         manager = OQManager(model_dirs=[str(fp_model_dir)])
         assert manager._output_dir == fp_model_dir
 
         manager.update_model_dirs(
             [str(second_fp_model_dir), str(fp_model_dir)]
         )
+        assert manager._model_dirs == [second_fp_model_dir, fp_model_dir]
         assert manager._output_dir == second_fp_model_dir
+
+    def test_update_to_empty_leaves_old_output_dir(self, tmp_path):
+        """Empty update is a no-op for output_dir — protects against an
+        accidental ``Path('.')`` fallback when the admin UI sends an
+        empty list."""
+        mgr = OQManager(model_dirs=[str(tmp_path)])
+        original = mgr._output_dir
+        mgr.update_model_dirs([])
+        assert mgr._model_dirs == []
+        assert mgr._output_dir == original
 
 
 # =============================================================================
