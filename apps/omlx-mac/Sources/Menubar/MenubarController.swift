@@ -6,10 +6,12 @@
 //   • Force Restart   (UNRESPONSIVE/ERROR only)
 //   • Stop Server     (RUNNING / STARTING / STOPPING / UNRESPONSIVE)
 //   • Start Server    (STOPPED / IDLE / FAILED)
-//   • Serving Stats   (Session + All-Time submenu)
-//   • Admin Panel     (enabled when running — opens the SwiftUI AppView
-//                      window via the openAppView callback)
-//   • Chat with oMLX  (enabled when running — opens /admin/chat in browser)
+//   • Serving Stats     (Session + All-Time submenu)
+//   • Settings…         (Cmd-, — opens the SwiftUI AppView window via the
+//                        openAppView callback)
+//   • Open Web Dashboard (enabled when running — opens the web admin
+//                        dashboard in the browser via /admin/auto-login)
+//   • Chat with oMLX    (enabled when running — opens /admin/chat in browser)
 //   • About oMLX
 //   • Quit oMLX       (Cmd-Q)
 //
@@ -49,6 +51,7 @@ final class MenubarController: NSObject {
     private var statsParentItem: NSMenuItem!
     private var statsSubmenu: NSMenu!
     private var adminPanelItem: NSMenuItem!
+    private var webAdminItem: NSMenuItem!
     private var chatItem: NSMenuItem!
 
     private let iconOutline: NSImage?
@@ -171,13 +174,20 @@ final class MenubarController: NSObject {
 
         menu.addItem(.separator())
 
-        adminPanelItem = item(String(localized: "menubar.item.admin_panel",
-                                     defaultValue: "Admin Panel",
-                                     comment: "Menubar item that opens the main app window / admin panel"),
+        adminPanelItem = item(String(localized: "menubar.item.settings",
+                                     defaultValue: "Settings…",
+                                     comment: "Menubar item that opens the native settings/preferences window"),
                               action: #selector(openAdminPanel),
-                              symbol: "globe",
+                              symbol: "gearshape",
                               keyEquivalent: ",")
         menu.addItem(adminPanelItem)
+
+        webAdminItem = item(String(localized: "menubar.item.web_dashboard",
+                                   defaultValue: "Open Web Dashboard",
+                                   comment: "Menubar item that opens the browser-based web admin dashboard with auto-login"),
+                            action: #selector(openWebAdmin),
+                            symbol: "globe")
+        menu.addItem(webAdminItem)
 
         chatItem = item(String(localized: "menubar.item.chat",
                                defaultValue: "Chat with oMLX",
@@ -259,8 +269,11 @@ final class MenubarController: NSObject {
         startItem.isEnabled = (server != nil) && !liveLike
         stopItem.isEnabled = liveLike && !isStopping
 
-        // Admin Panel + Chat enabled when actually running (not unresponsive)
+        // Settings + Web Dashboard + Chat enabled when actually running
+        // (not unresponsive). Web Dashboard / Chat open a browser against
+        // the live port, so there's no point enabling them when stopped.
         adminPanelItem.isEnabled = isRunning
+        webAdminItem.isEnabled = isRunning
         chatItem.isEnabled = isRunning
 
         // Icon swap — outline when not actively serving, filled otherwise
@@ -548,6 +561,13 @@ final class MenubarController: NSObject {
         openAppView()
     }
 
+    @objc private func openWebAdmin() {
+        let host = MenubarController.displayHost(server: server, fallback: config.host)
+        let port = MenubarController.displayPort(server: server, fallback: config.port)
+        guard let url = MenubarController.webAdminURL(host: host, port: port, apiKey: config.apiKey) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     @objc private func openChat() {
         let host = MenubarController.displayHost(server: server, fallback: config.host)
         let port = MenubarController.displayPort(server: server, fallback: config.port)
@@ -622,6 +642,37 @@ extension MenubarController {
     /// Companion to `displayPort(server:fallback:)` — same rationale.
     static func displayHost(server: ServerProcess?, fallback: String) -> String {
         server?.host ?? fallback
+    }
+
+    /// Builds the browser URL for the web admin dashboard. Uses the
+    /// `/admin/auto-login` endpoint so the dashboard opens without the
+    /// manual login form: the server validates the main API key, sets the
+    /// session cookie, then redirects to `redirect`. A missing/stale key
+    /// makes the endpoint redirect to the login page instead — a graceful
+    /// fallback, so we still emit the URL.
+    ///
+    /// `URLComponents.queryItems` percent-encodes the key, so a key
+    /// containing `&`, `=`, `/`, spaces etc. is transmitted intact. The one
+    /// exception is `+`: URLComponents leaves it unescaped and servers
+    /// decode `+` as a space (form-urlencoded semantics), which would
+    /// corrupt a key containing `+`. We escape it explicitly below.
+    ///
+    /// Internal (not private) so `MenubarControllerPortTests` can exercise
+    /// it without a live `NSStatusBar`.
+    static func webAdminURL(host: String, port: Int, apiKey: String?) -> URL? {
+        var comps = URLComponents()
+        comps.scheme = "http"
+        comps.host = host
+        comps.port = port
+        comps.path = "/admin/auto-login"
+        var items = [URLQueryItem(name: "redirect", value: "/admin/dashboard")]
+        if let key = apiKey, !key.isEmpty {
+            items.append(URLQueryItem(name: "key", value: key))
+        }
+        comps.queryItems = items
+        comps.percentEncodedQuery = comps.percentEncodedQuery?
+            .replacingOccurrences(of: "+", with: "%2B")
+        return comps.url
     }
 }
 

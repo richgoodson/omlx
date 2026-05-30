@@ -2994,18 +2994,6 @@
         }
       }
     },
-    "menubar.item.admin_panel" : {
-      "comment" : "Menubar item that opens the main app window / admin panel",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Admin Panel"
-          }
-        }
-      }
-    },
     "menubar.item.chat" : {
       "comment" : "Menubar item that opens the browser-based chat dashboard",
       "extractionState" : "manual",
@@ -3054,6 +3042,18 @@
         }
       }
     },
+    "menubar.item.settings" : {
+      "comment" : "Menubar item that opens the native settings/preferences window",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Settings…"
+          }
+        }
+      }
+    },
     "menubar.item.start_server" : {
       "comment" : "Menubar item that starts the server",
       "extractionState" : "manual",
@@ -3074,6 +3074,18 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Stop Server"
+          }
+        }
+      }
+    },
+    "menubar.item.web_dashboard" : {
+      "comment" : "Menubar item that opens the browser-based web admin dashboard with auto-login",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Web Dashboard"
           }
         }
       }
