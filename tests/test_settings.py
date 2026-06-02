@@ -716,6 +716,22 @@ class TestGlobalSettings:
 
         assert settings.get_effective_model_dirs() == [primary.resolve()]
 
+    def test_cli_override_memory_guard_tier(self, tmp_path):
+        """CLI memory guard tier should override loaded settings."""
+        args = Namespace(memory_guard="safe", memory_guard_gb=None)
+        settings = GlobalSettings.load(base_path=tmp_path, cli_args=args)
+
+        assert settings.memory.memory_guard_tier == "safe"
+        assert settings.memory.memory_guard_custom_ceiling_gb == 0.0
+
+    def test_cli_override_memory_guard_gb_sets_custom_tier(self, tmp_path):
+        """CLI memory guard GB should select custom tier automatically."""
+        args = Namespace(memory_guard=None, memory_guard_gb=48.0)
+        settings = GlobalSettings.load(base_path=tmp_path, cli_args=args)
+
+        assert settings.memory.memory_guard_tier == "custom"
+        assert settings.memory.memory_guard_custom_ceiling_gb == 48.0
+
     def test_load_from_file(self):
         """Test loading settings from JSON file."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -995,6 +1011,13 @@ class TestGlobalSettings:
             settings.memory.memory_guard_tier = tier
             errors = settings.validate()
             assert not any("memory_guard_tier" in e for e in errors)
+
+        settings = GlobalSettings()
+        settings.memory.memory_guard_tier = "custom"
+        settings.memory.memory_guard_custom_ceiling_gb = 48.0
+        errors = settings.validate()
+        assert not any("memory_guard_tier" in e for e in errors)
+        assert not any("memory_guard_custom_ceiling_gb" in e for e in errors)
 
     def test_validate_memory_guard_tier_invalid(self):
         """Test validation flags unknown tier values."""

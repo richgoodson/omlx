@@ -925,6 +925,13 @@ class GlobalSettings:
         ):
             self.scheduler.embedding_batch_size = args.embedding_batch_size
 
+        # Memory guard settings
+        if hasattr(args, "memory_guard") and args.memory_guard is not None:
+            self.memory.memory_guard_tier = args.memory_guard
+        if hasattr(args, "memory_guard_gb") and args.memory_guard_gb is not None:
+            self.memory.memory_guard_tier = "custom"
+            self.memory.memory_guard_custom_ceiling_gb = float(args.memory_guard_gb)
+
         # Cache settings
         if hasattr(args, "cache_enabled") and args.cache_enabled is not None:
             self.cache.enabled = args.cache_enabled
