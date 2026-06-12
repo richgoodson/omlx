@@ -2750,6 +2750,11 @@ async def create_completion(
             req_xtc_threshold=getattr(request, "xtc_threshold", None),
         )
 
+        gen_kwargs = {}
+        thinking_budget = _resolve_thinking_budget(request, request.model)
+        if thinking_budget is not None:
+            gen_kwargs["thinking_budget"] = thinking_budget
+
         for i, prompt in enumerate(prompts):
             output = await engine.generate(
                 prompt=prompt,
@@ -2765,6 +2770,7 @@ async def create_completion(
                 xtc_threshold=xtc_threshold,
                 stop=request.stop,
                 seed=request.seed,
+                **gen_kwargs,
             )
 
             choices.append(
@@ -3746,6 +3752,10 @@ async def stream_completion(
         req_xtc_probability=getattr(request, "xtc_probability", None),
         req_xtc_threshold=getattr(request, "xtc_threshold", None),
     )
+    gen_kwargs = {}
+    thinking_budget = _resolve_thinking_budget(request, request.model)
+    if thinking_budget is not None:
+        gen_kwargs["thinking_budget"] = thinking_budget
     try:
         async for output in engine.stream_generate(
             prompt=prompt,
@@ -3761,6 +3771,7 @@ async def stream_completion(
             xtc_threshold=xtc_threshold,
             stop=request.stop,
             seed=request.seed,
+            **gen_kwargs,
         ):
             if first_token_time is None and output.new_text:
                 first_token_time = time.perf_counter()
