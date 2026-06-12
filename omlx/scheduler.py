@@ -473,6 +473,43 @@ def _patched_generation_batch_step(self):
 GenerationBatch._step = _patched_generation_batch_step
 
 
+# ---------------------------------------------------------------------------
+# Monkey-patch GenerationBatch.filter to keep logits_processors aligned with
+# uids.  mlx-lm's filter only reindexes the processor list when at least one
+# row has an active processor:
+#
+#     if any(self.logits_processors):
+#         self.logits_processors = [self.logits_processors[idx] for idx in keep]
+#
+# There is no else branch (unlike the prompt-batch class, which resets to
+# ``[[]] * len(keep)``), so when every slot is empty — the normal state after
+# serving requests without per-request processors — the stale list survives
+# while uids/tokens shrink.  A later extend() then appends the next request's
+# processors BEHIND its own row index: the row reads a leftover empty slot and
+# the real processor (thinking budget, grammar constraint) is silently never
+# applied.  Which requests are affected depends on insertion/removal order,
+# and alignment self-heals once the broken request finishes, so the symptom
+# is an intermittently ignored thinking_budget or grammar.  See #934/#1747
+# for the sibling None-slot collapse handled in _patched_generation_batch_step.
+_original_generation_batch_filter = GenerationBatch.filter
+
+
+def _patched_generation_batch_filter(self, keep):
+    lps = self.logits_processors
+    lps_inert = not lps or not any(lps)
+    if lps is None:
+        # ``any(None)`` inside the original filter raises TypeError.
+        self.logits_processors = []
+    _original_generation_batch_filter(self, keep)
+    if lps_inert:
+        # Original filter skipped the reindex; reset to one empty slot per
+        # surviving row so extend() appends at the correct indices.
+        self.logits_processors = [[] for _ in keep]
+
+
+GenerationBatch.filter = _patched_generation_batch_filter
+
+
 # Monkey-patch TurboQuantKVCache.merge so _merge_caches() works
 try:
     from mlx_vlm.turboquant import TurboQuantKVCache as _TQCache
