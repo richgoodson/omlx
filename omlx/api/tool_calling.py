@@ -21,6 +21,7 @@ import bisect
 import json
 import logging
 import re
+import regex
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -417,7 +418,15 @@ class _Gemma4ArgsTooComplex(ValueError):
 # lane's degenerate prefixes (``calldone{`` missing the colon, ``:done{``
 # missing ``call``, #1837) still match; the fallback only runs on
 # marker-delimited content, so a permissive prefix cannot misfire on prose.
-_GEMMA4_CALL_HEAD = re.compile(r"(?:call)?:?([\w.-]+(?::[\w.-]+)*)\{")
+#
+# Compiled with the ``regex`` module, NOT ``re``: once the ``call:`` literal
+# anchor became optional (above), ``re``'s engine restarts the greedy
+# ``[\w.-]+`` match at every position of a long bare argument value and
+# backtracks O(n^2) hunting an opening ``{`` that never comes, hanging on
+# adversarial output (a 300 KB bare value pegs a core indefinitely).  The
+# ``regex`` engine fails that same partial match fast, so finditer stays
+# linear.  See test_oversized_args_fail_cleanly.
+_GEMMA4_CALL_HEAD = regex.compile(r"(?:call)?:?([\w.-]+(?::[\w.-]+)*)\{")
 
 
 def _squote_close_positions(s: str) -> list:
